@@ -1,50 +1,84 @@
 use crate::error::Error;
 use actix::prelude::*;
-use log::{debug, info};
+use log::{debug, info, error};
 use redis::{aio::MultiplexedConnection, Client};
 
 /// Actix Redis cache backend actor.
-pub struct Redis {
+pub struct RedisActor {
     #[allow(dead_code)]
-    client: Client,
-    connection: MultiplexedConnection,
+    connection_info: String,
+    connection: Option<MultiplexedConnection>,
 }
 
-impl Redis {
-    pub async fn new() -> Result<Redis, Error> {
+impl RedisActor {
+    pub async fn new() -> Result<RedisActor, Error> {
         Self::builder().build().await
     }
-    pub fn builder() -> RedisBuilder {
-        RedisBuilder::default()
+
+    pub fn builder() -> RedisActorBuilder {
+        RedisActorBuilder::default()
+    }
+    
+    pub fn start(connection_info: String) -> Addr<RedisActor> {
+        Supervisor::start(|_| {
+            RedisActor {
+                connection_info,
+                connection: None,
+            }
+        })
     }
 }
 
-pub struct RedisBuilder {
+pub struct RedisActorBuilder {
     connection_info: String,
 }
 
-impl Default for RedisBuilder {
+impl Default for RedisActorBuilder {
     fn default() -> Self {
-        RedisBuilder {
+        RedisActorBuilder {
             connection_info: "redis://127.0.0.1/".to_owned(),
         }
     }
 }
 
-impl RedisBuilder {
-    pub async fn build(&self) -> Result<Redis, Error> {
-        let client = Client::open(self.connection_info.as_str())?;
-        let connection = client.get_multiplexed_tokio_connection().await?;
-        Ok(Redis { client, connection })
+impl RedisActorBuilder {
+    pub async fn build(&self) -> Result<RedisActor, Error> {
+        // let client = Client::open(self.connection_info.as_str())?;
+        // let connection = client.get_multiplexed_tokio_connection().await?;
+        Ok(RedisActor { connection_info: self.connection_info.clone(), connection: None })
+    }
+}
+
+impl Supervised for RedisActor {
+    fn restarting(&mut self, _: &mut Self::Context) {
+        info!("Redis actor restarted");
     }
 }
 
 /// Implementation actix Actor trait for Redis cache backend.
-impl Actor for Redis {
+impl Actor for RedisActor {
     type Context = Context<Self>;
 
-    fn started(&mut self, _: &mut Self::Context) {
-        info!("Cache actor started");
+    fn started(&mut self, ctx: &mut Self::Context) {
+        info!("Redis actor started");
+        let addr = self.connection_info.clone();
+        async move {
+            let client = Client::open(addr.as_ref()).unwrap();
+            client.get_multiplexed_async_connection().await
+        }
+            .into_actor(self)
+            .map(|res, act, ctx| match res {
+                Ok((con, fut)) => {
+                    debug!("Connected to redis server");
+                    dbg!("Connected to redis");
+                    act.connection = Some(con);
+                    fut.into_actor(act).wait(ctx);
+                },
+                Err(err) => {
+                    error!("Connection to redis server failed: {}", err);
+                }
+            })
+            .wait(ctx);
     }
 }
 
@@ -56,19 +90,26 @@ pub struct Get {
 }
 
 /// Implementation of Actix Handler for Get message.
-impl Handler<Get> for Redis {
+impl Handler<Get> for RedisActor {
     type Result = ResponseFuture<Result<Option<String>, Error>>;
 
     fn handle(&mut self, msg: Get, _: &mut Self::Context) -> Self::Result {
-        let mut con = self.connection.clone();
-        let fut = async move {
-            redis::cmd("GET")
-                .arg(msg.key)
-                .query_async(&mut con)
-                .await
-                .map_err(Error::from)
-        };
-        Box::pin(fut)
+        match self.connection {
+            Some(ref connection) => {
+                let mut con = connection.clone();
+                let fut = async move {
+                    redis::cmd("GET")
+                        .arg(msg.key)
+                        .query_async(&mut con)
+                        .await
+                        .map_err(Error::from)
+                };
+                Box::pin(fut)
+            },
+            None => {
+                Box::pin(async {Err(Error::Connection)})
+            }
+        }
     }
 }
 
@@ -82,19 +123,33 @@ pub struct Set {
 }
 
 /// Implementation of Actix Handler for Set message.
-impl Handler<Set> for Redis {
+impl Handler<Set> for RedisActor {
     type Result = ResponseFuture<Result<String, Error>>;
 
     fn handle(&mut self, msg: Set, _: &mut Self::Context) -> Self::Result {
-        let mut con = self.connection.clone();
-        Box::pin(async move {
-            let mut request = redis::cmd("SET");
-            request.arg(msg.key).arg(msg.value);
-            if let Some(ttl) = msg.ttl {
-                request.arg("EX").arg(ttl);
-            };
-            request.query_async(&mut con).await.map_err(Error::from)
-        })
+        match self.connection {
+            Some(ref connection) => {
+                dbg!("++++++++");
+                let mut con = connection.clone();
+                Box::pin(async move {
+                    let mut request = redis::cmd("SET");
+                    request
+                        .arg(msg.key)
+                        .arg(msg.value);
+                    if let Some(ttl) = msg.ttl {
+                        request.arg("EX").arg(ttl);
+                    };
+                    request
+                        .query_async(&mut con)
+                        .await
+                        .map_err(Error::from)
+                })
+            },
+            None => {
+                dbg!("===========================");
+                Box::pin(async {Err(Error::Connection)})
+            }
+        }
     }
 }
 
@@ -115,11 +170,11 @@ pub struct Delete {
 }
 
 /// Implementation of Actix Handler for Delete message.
-impl Handler<Delete> for Redis {
+impl Handler<Delete> for RedisActor {
     type Result = ResponseFuture<Result<DeleteStatus, Error>>;
 
     fn handle(&mut self, msg: Delete, _: &mut Self::Context) -> Self::Result {
-        let mut con = self.connection.clone();
+        let mut con = self.connection.clone().unwrap();
         Box::pin(async move {
             redis::cmd("DEL")
                 .arg(msg.key)
@@ -155,12 +210,12 @@ pub enum LockStatus {
 }
 
 /// Implementation of Actix Handler for Lock message.
-impl Handler<Lock> for Redis {
+impl Handler<Lock> for RedisActor {
     type Result = ResponseFuture<Result<LockStatus, Error>>;
 
     fn handle(&mut self, msg: Lock, _: &mut Self::Context) -> Self::Result {
         debug!("Redis Lock: {}", msg.key);
-        let mut con = self.connection.clone();
+        let mut con = self.connection.clone().unwrap();
         Box::pin(async move {
             redis::cmd("SET")
                 .arg(format!("lock::{}", msg.key))

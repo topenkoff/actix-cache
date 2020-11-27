@@ -13,6 +13,7 @@ actix-rt = "1"
 actix-cache-backend = "0.1"
 actix-cache-redis = { version = "0.1", optional = true }
 actix-cache-derive = { version = "0.1", optional = true }
+actix-cache-rediscluster = { version = "0.1", optional = true }
 serde_json = "1"
 serde_qs = { version = "0.7", optional = true }
 serde = { version = "1", features = ["derive"] }
@@ -30,6 +31,7 @@ actix-web = "3"
 members = [
   ".",
   "actix-cache-redis",
+  "actix-cache-rediscluster",
   "actix-cache-backend",
   "actix-cache-derive",
 ]
@@ -37,6 +39,7 @@ members = [
 [patch.crates-io]
 actix-cache = { path = "." }
 actix-cache-redis = { path = "actix-cache-redis" }
+actix-cache-rediscluster = { path = "actix-cache-rediscluster" }
 actix-cache-backend = { path = "actix-cache-backend" }
 actix-cache-derive = { path = "actix-cache-derive" }
 
@@ -56,5 +59,6 @@ required-features = ["derive", "metrics"]
 default = ["redis"]
 
 redis = ["actix-cache-redis"]
+redis-cluster = ["actix-cache-rediscluster"]
 derive = ["actix-cache-derive", "serde_qs"]
 metrics = ["prometheus", "lazy_static"]

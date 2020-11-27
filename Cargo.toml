@@ -34,12 +34,6 @@ members = [
   "actix-cache-derive",
 ]
 
-[patch.crates-io]
-actix-cache = { path = "." }
-actix-cache-redis = { path = "actix-cache-redis" }
-actix-cache-backend = { path = "actix-cache-backend" }
-actix-cache-derive = { path = "actix-cache-derive" }
-
 [[example]]
 name = "debug"
 required-features = ["derive"]
